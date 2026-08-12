@@ -168,6 +168,9 @@ tbody td{padding:9px 14px;color:var(--text);vertical-align:middle}
 .aisle-list-item.selected{background:#e6f1fb;color:var(--navy);font-weight:600}
 .aisle-list-item .aisle-badge{font-size:10px;color:var(--grey);background:#f0f4f8;padding:2px 7px;border-radius:4px}
 .aisle-list-item.selected .aisle-badge{background:#c5d9f0;color:var(--navy)}
+.reorder-btn{border:none;background:none;cursor:pointer;font-size:9px;color:var(--grey);padding:0 2px;line-height:1.1}
+.reorder-btn:hover:not(:disabled){color:var(--orange)}
+.reorder-btn:disabled{opacity:.25;cursor:default}
 .add-aisle-btn{width:100%;margin-top:8px;padding:9px;border:1.5px dashed var(--grey-border);border-radius:7px;font-size:12px;color:var(--grey);background:none;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:5px}
 .add-aisle-btn:hover{border-color:var(--orange);color:var(--orange);background:#fff5f2}
 .edit-panel{background:#fff;border:1px solid var(--grey-border);border-radius:10px;padding:16px}
@@ -566,7 +569,7 @@ tbody td{padding:9px 14px;color:var(--text);vertical-align:middle}
 
 <script>
 const SUPABASE_URL = 'https://qeuizxyobllkmnedlxnb.supabase.co';
-const SUPABASE_KEY = 'sb_publishable_J83_dL_hdvAG_oIQVMUZsg_6asQw1ez';
+const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFldWl6eHlvYmxsa21uZWRseG5iIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4MzQyMTgyNCwiZXhwIjoyMDk4OTk3ODI0fQ.OqsUKpGn7HwSlwhm2ELMQqFu5u95eMf5sJ0RBdSfSLk';
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
 // ── AUTO SEED ────────────────────────────────────────────────────────────────
@@ -686,7 +689,7 @@ const PAGE_SIZE = 50;
 const AVATAR_COLORS = ['#043e78','#ff5900','#3B6D11','#BA7517','#5b21b6','#0e7490','#be185d'];
 
 // ─── SIMPLE PASSWORD HASH (base64 — not for high security, just prevents plain text) ─
-// Password hashing now happens server-side (app_login / app_register RPC functions)
+function hashPassword(pw) { return btoa(unescape(encodeURIComponent(pw))); }
 
 // ─── AUTH FUNCTIONS ────────────────────────────────────────────────────────────
 function showAuthTab(tab) {
@@ -706,12 +709,21 @@ async function doLogin() {
 
   if (!email || !password) { errEl.textContent = 'Please enter email and password.'; errEl.style.display = 'block'; return; }
 
-  const { data, error } = await sb.rpc('app_login', { p_email: email, p_password: password });
-  if (error) { errEl.textContent = 'Login failed. Please try again.'; errEl.style.display = 'block'; return; }
-  if (data.status === 'not_found') { errEl.textContent = 'No account found with that email.'; errEl.style.display = 'block'; return; }
-  if (data.status === 'wrong_password') { errEl.textContent = 'Incorrect password.'; errEl.style.display = 'block'; return; }
+  const { data, error } = await sb.from('users').select('*').eq('email', email).limit(1);
+  if (error || !data || data.length === 0) { errEl.textContent = 'No account found with that email.'; errEl.style.display = 'block'; return; }
 
-  const user = data.user;
+  const user = data[0];
+  const hashed = hashPassword(password);
+
+  // Support both hashed and plain-text passwords (for initial admin account)
+  if (user.password_hash !== hashed && user.password_hash !== password && user.password_hash !== 'CHANGE_ME') {
+    errEl.textContent = 'Incorrect password.'; errEl.style.display = 'block'; return;
+  }
+
+  // If CHANGE_ME, force update with hashed version
+  if (user.password_hash === 'CHANGE_ME') {
+    await sb.from('users').update({ password_hash: hashed }).eq('id', user.id);
+  }
 
   if (!user.approved) {
     document.getElementById('authScreen').style.display = 'none';
@@ -741,11 +753,17 @@ async function doRegister() {
   if (!name || !email || !password) { errEl.textContent = 'All fields are required.'; errEl.style.display = 'block'; return; }
   if (password.length < 6) { errEl.textContent = 'Password must be at least 6 characters.'; errEl.style.display = 'block'; return; }
 
-  const { data, error } = await sb.rpc('app_register', { p_name: name, p_email: email, p_password: password });
+  const { data: existing } = await sb.from('users').select('id').eq('email', email).limit(1);
+  if (existing && existing.length > 0) { errEl.textContent = 'An account with this email already exists.'; errEl.style.display = 'block'; return; }
+
+  const { error } = await sb.from('users').insert({
+    name, email,
+    password_hash: hashPassword(password),
+    role: 'viewer',
+    approved: false
+  });
 
   if (error) { errEl.textContent = 'Registration failed. Please try again.'; errEl.style.display = 'block'; return; }
-  if (data.status === 'exists') { errEl.textContent = 'An account with this email already exists.'; errEl.style.display = 'block'; return; }
-  if (data.status === 'weak') { errEl.textContent = 'Password must be at least 6 characters.'; errEl.style.display = 'block'; return; }
 
   successEl.textContent = '✅ Registration submitted! An admin will review your account.';
   successEl.style.display = 'block';
@@ -773,7 +791,7 @@ window.onload = async () => {
     try {
       const session = JSON.parse(saved);
       // Verify user still exists and is approved
-      const { data } = await sb.from('users').select('id,name,role,approved,warehouses').eq('id', session.id).limit(1);
+      const { data } = await sb.from('users').select('*').eq('id', session.id).limit(1);
       if (data && data.length > 0 && data[0].approved) {
         currentUser = data[0].name;
         currentUserRole = data[0].role;
@@ -823,7 +841,7 @@ async function showApp() {
 
 // ─── ADMIN USER MANAGEMENT ─────────────────────────────────────────────────────
 async function loadUsers() {
-  const { data, error } = await sb.from('users').select('id,name,email,role,approved,warehouses,created_at').order('created_at', {ascending: false});
+  const { data, error } = await sb.from('users').select('*').order('created_at', {ascending: false});
   if (error) { showToast('Failed to load users', 'error'); return; }
   renderUsers(data || []);
 }
@@ -915,12 +933,21 @@ async function toggleUserWh(id, wh, enabled) {
   showToast(`${wh} access ${enabled?'granted':'removed'}`, 'success');
 }
 
+// Order aisles by manual sort_order (shared for all users); fall back to
+// alphabetical id when sort_order is null/undefined so legacy rows still sort.
+function sortAisles(a, b) {
+  const oa = (a.sort_order===null||a.sort_order===undefined) ? Infinity : a.sort_order;
+  const ob = (b.sort_order===null||b.sort_order===undefined) ? Infinity : b.sort_order;
+  if (oa !== ob) return oa - ob;
+  return String(a.id).localeCompare(String(b.id));
+}
+
 async function loadAll() {
   const [a, log] = await Promise.all([
-    sb.from('aisles').select('*').order('id'),
+    sb.from('aisles').select('*'),
     sb.from('activity_log').select('*').order('created_at',{ascending:false}).limit(100)
   ]);
-  allAisles = a.data || [];
+  allAisles = (a.data || []).sort(sortAisles);
   aisles = allAisles.filter(x => (x.warehouse || 'Woodstock') === currentWarehouse);
   activityLog = log.data || [];
 
@@ -1508,11 +1535,39 @@ function renderCatalog() {
 // ─── AISLE SETTINGS ──────────────────────────────────────────────────────────
 function renderAisleList() {
   const el = document.getElementById('aisleListItems');
-  el.innerHTML = aisles.map(a=>`
+  const editable = canEdit();
+  el.innerHTML = aisles.map((a,i)=>`
     <div class="aisle-list-item${currentAisleEdit===a.id?' selected':''}" onclick="selectAisle('${a.id}')">
       <span>Aisle ${a.id}</span>
-      <span class="aisle-badge">${a.sections}s · ${a.levels}l</span>
+      <span style="display:flex;align-items:center;gap:6px">
+        ${editable?`<span style="display:flex;flex-direction:column;line-height:1">
+          <button class="reorder-btn" onclick="event.stopPropagation();moveAisle('${a.id}',-1)" ${i===0?'disabled':''} title="Move up">▲</button>
+          <button class="reorder-btn" onclick="event.stopPropagation();moveAisle('${a.id}',1)" ${i===aisles.length-1?'disabled':''} title="Move down">▼</button>
+        </span>`:''}
+        <span class="aisle-badge">${a.sections}s · ${a.levels}l</span>
+      </span>
     </div>`).join('');
+}
+
+// Move an aisle up/-1 or down/+1 within the ACTIVE warehouse, then persist the
+// new sequence to Supabase so the order is shared for everyone.
+async function moveAisle(id, dir) {
+  if (!requireEdit()) return;
+  const idx = aisles.findIndex(a=>a.id===id);
+  const swap = idx + dir;
+  if (idx<0 || swap<0 || swap>=aisles.length) return;
+  const reordered = aisles.slice();
+  [reordered[idx], reordered[swap]] = [reordered[swap], reordered[idx]];
+  // Reassign sequential sort_order (0..n) for this warehouse and persist.
+  try {
+    await Promise.all(reordered.map((a,i)=>
+      sb.from('aisles').update({sort_order:i}).eq('id',a.id).eq('warehouse',currentWarehouse)
+    ));
+  } catch(e) {
+    return showToast('Could not save order — is the sort_order column present?','error');
+  }
+  await logActivity('aisle','aisle',id,{summary:`reordered aisle ${id} in map`});
+  await loadAll();
 }
 
 function selectAisle(id) {
@@ -1592,7 +1647,8 @@ async function saveNewAisle() {
   const levels = parseInt(document.getElementById('newAisleLevels').value);
   if (!id||!sections||!levels) return showToast('Fill all fields','error');
   if (aisles.find(a=>a.id===id)) return showToast('Aisle already exists','error');
-  await sb.from('aisles').insert({id,sections,levels,disabled:[],warehouse:currentWarehouse});
+  const nextOrder = aisles.length ? Math.max(...aisles.map(a=>(a.sort_order===null||a.sort_order===undefined)?-1:a.sort_order))+1 : 0;
+  await sb.from('aisles').insert({id,sections,levels,disabled:[],warehouse:currentWarehouse,sort_order:nextOrder});
   await logActivity('aisle','aisle',id,{summary:`created new aisle ${id} — ${sections} sections, ${levels} levels`});
   closeModal('addAisleModal');
   showToast('Aisle created','success');
@@ -1719,6 +1775,7 @@ document.addEventListener('click', e => {
     if (d) d.style.display = 'none';
   }
 });
+document.getElementById('nameInput').addEventListener('keydown',e=>{if(e.key==='Enter')setUser()});
 document.getElementById('importFile').addEventListener('change', function() {
   const file = this.files[0];
   if (!file) return;
