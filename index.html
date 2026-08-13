@@ -1775,7 +1775,7 @@ document.addEventListener('click', e => {
     if (d) d.style.display = 'none';
   }
 });
-document.getElementById('nameInput').addEventListener('keydown',e=>{if(e.key==='Enter')setUser()});
+document.getElementById('nameInput')?.addEventListener('keydown',e=>{if(e.key==='Enter')setUser()});
 document.getElementById('importFile').addEventListener('change', function() {
   const file = this.files[0];
   if (!file) return;
